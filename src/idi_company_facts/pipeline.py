@@ -509,17 +509,21 @@ class CompanyFactsPipeline(Pipeline):
                 )
                 continue  # resume: already extracted on a previous run
 
-            if scraped_filing.failure_reason:
-                self.stats.increment("failed_filings")
-                self._report_disposition(
-                    scraped_filing.cik,
-                    scraped_filing.accession_number,
-                    "failed(upstream_scraper_failure)",
-                )
-                continue  # scraper-side failure — nothing actionable on our end
-
+            # failure_reason is checked against the documents rather than on its
+            # own: the scraper does not always clear it after a later successful
+            # re-scrape, so a filing can carry a stale reason alongside a primary
+            # document that is present in S3 and perfectly extractable.
             doc = self._select_primary_document(scraped_filing)
+
             if doc is None:
+                if scraped_filing.failure_reason:
+                    self.stats.increment("failed_filings")
+                    self._report_disposition(
+                        scraped_filing.cik,
+                        scraped_filing.accession_number,
+                        "failed(upstream_scraper_failure)",
+                    )
+                    continue  # scraper-side failure — nothing actionable on our end
                 self.stats.increment("failed_primary_docs")
                 self.failures.add(
                     (scraped_filing.cik, scraped_filing.accession_number),

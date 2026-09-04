@@ -170,7 +170,7 @@ class TestLoadInput:
     def test_skips_upstream_failures(
         self, pipeline: CompanyFactsPipeline, mocker: MockerFixture
     ) -> None:
-        """Manifests with a non-empty failure_reason are skipped; no failure recorded."""
+        """A failure_reason with no primary document is skipped; no failure recorded."""
         failing = make_manifest(failure_reason="scraper timed out", documents=[])
         mocker.patch(
             "idi_company_facts.pipeline.iter_filings_by_form_type", return_value=iter([failing])
@@ -181,6 +181,52 @@ class TestLoadInput:
         assert len(filings) == 0
         assert pipeline.stats.total_filings == 1
         assert pipeline.stats.failed_filings == 1
+        assert pipeline.stats.failed_primary_docs == 0
+        assert (failing.cik, failing.accession_number) not in pipeline.failures
+
+    def test_failure_reason_with_primary_doc_is_processed(
+        self, pipeline: CompanyFactsPipeline, mocker: MockerFixture
+    ) -> None:
+        """A failure_reason left over from an earlier attempt does not skip the filing.
+
+        The scraper does not always clear failure_reason after a later
+        successful re-scrape, so a filing can carry a stale reason alongside a
+        primary document that is present in S3 (observed on TotalEnergies'
+        FY2025 20-F, accession 0001104659-26-035876).
+        """
+        stale = make_manifest(
+            failure_reason="documents_missing",
+            documents=[make_doc(s3_key="s3://bucket/sec/tot-20251231x20f.htm")],
+        )
+        mocker.patch(
+            "idi_company_facts.pipeline.iter_filings_by_form_type", return_value=iter([stale])
+        )
+
+        filings = pipeline.load_input()
+
+        assert len(filings) == 1
+        assert filings[0].primary_s3_key == "s3://bucket/sec/tot-20251231x20f.htm"
+        assert pipeline.stats.failed_filings == 0
+        assert pipeline.stats.failed_primary_docs == 0
+        assert (stale.cik, stale.accession_number) not in pipeline.failures
+
+    def test_failure_reason_with_only_non_primary_docs_is_an_upstream_failure(
+        self, pipeline: CompanyFactsPipeline, mocker: MockerFixture
+    ) -> None:
+        """A failure_reason still wins when no document matches the primary type."""
+        failing = make_manifest(
+            failure_reason="documents_missing",
+            documents=[make_doc(doc_type="EX-21.1")],
+        )
+        mocker.patch(
+            "idi_company_facts.pipeline.iter_filings_by_form_type", return_value=iter([failing])
+        )
+
+        filings = pipeline.load_input()
+
+        assert len(filings) == 0
+        assert pipeline.stats.failed_filings == 1
+        # MISSING_DOCUMENT is reserved for filings the scraper considered clean.
         assert pipeline.stats.failed_primary_docs == 0
         assert (failing.cik, failing.accession_number) not in pipeline.failures
 
